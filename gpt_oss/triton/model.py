@@ -10,6 +10,12 @@ from gpt_oss.torch.weights import Checkpoint
 from gpt_oss.triton.attention import attention, attention_ref
 from gpt_oss.triton.moe import quantize_mx4, moe
 
+# Import optimization constraint function for fixing shared memory issues
+try:
+    from triton_kernels.matmul_ogs_details.opt_flags import update_opt_flags_constraints
+except ImportError:
+    update_opt_flags_constraints = None
+
 
 class RotaryEmbedding(torch.nn.Module):
     def __init__(
@@ -474,6 +480,17 @@ class TokenGenerator:
         self.model = Transformer.from_checkpoint(checkpoint, device=self.device)
         self.caches = [Cache(1, context, self.model.config.num_key_value_heads, device=self.device) for _ in range(len(self.model.block))]
         self.input_token = torch.zeros(1, dtype=torch.int32, device=self.device)
+        
+        # Fix shared memory issues by constraining optimization flags
+        if update_opt_flags_constraints is not None:
+            # Reduce num_stages to fit within hardware shared memory limits
+            # Your GPU has 101376 bytes but kernel needs 131072, so reduce num_stages
+            update_opt_flags_constraints({
+                "num_stages": 2,  # Reduce from default 3-4 to 2
+                "block_m": 64,    # Reduce block size to lower memory usage
+                "block_k": 64     # Reduce block size to lower memory usage
+            })
+
         # warmup
         self.model(self.input_token[None, :], caches=self.caches)
         # capture for sampling
